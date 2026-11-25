@@ -57,6 +57,20 @@ const VIEW_PAST = 24 * 3600 * 1000;
 const VIEW_AHEAD = 12 * 3600 * 1000;
 
 const WEEKDAY_KEYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+const WEEKDAY_ALIASES = {
+  mon: ["mon", "monday", "lun", "lunedi", "lunedì"],
+  tue: ["tue", "tuesday", "mar", "martedi", "martedì"],
+  wed: ["wed", "wednesday", "mer", "mercoledi", "mercoledì"],
+  thu: ["thu", "thursday", "gio", "giovedi", "giovedì"],
+  fri: ["fri", "friday", "ven", "venerdi", "venerdì"],
+  sat: ["sat", "saturday", "sab", "sabato"],
+  sun: ["sun", "sunday", "dom", "domenica"],
+};
+
+function localIsoDate(day) {
+  const pad = (value) => String(value).padStart(2, "0");
+  return `${day.getFullYear()}-${pad(day.getMonth() + 1)}-${pad(day.getDate())}`;
+}
 
 /** True when two active profiles cannot be on together (as the integration checks). */
 function profileOverlap(a, b) {
@@ -87,6 +101,19 @@ function guessDays(name) {
   if (name === "workday" || name === "weekend") return name;
   if (WEEKDAY_KEYS.includes(name)) return [name];
   return "all";
+}
+
+function profileDayIndex(name, metadata) {
+  const days = metadata?.days;
+  const candidates = Array.isArray(days) ? days : [days, name];
+  for (const candidate of candidates) {
+    const value = String(candidate || "").toLowerCase();
+    if (value === "workday" || value === "all") return 0;
+    if (value === "weekend") return 5;
+    const index = WEEKDAY_KEYS.findIndex((day) => WEEKDAY_ALIASES[day].includes(value));
+    if (index >= 0) return index;
+  }
+  return 99;
 }
 
 /** Turn a profile on or off; the active profiles that overlap it are turned off. */
@@ -2173,6 +2200,10 @@ class SmartHeatingControlCard extends HTMLElement {
     this.attachShadow({ mode: "open" });
     this._editing = null;
     this._draft = null;
+    this._draftWeeks = null;
+    this._draftWeek = 1;
+    this._draftRotationEnabled = false;
+    this._scheduleWeek = {};
     this._open = {};
     this._lastKey = "";
     this._error = {};
@@ -4997,7 +5028,15 @@ class SmartHeatingControlCard extends HTMLElement {
     const intro = this._scheduleIntro(a, stateObj);
     const meta = a.profile_days || {};
     if (this._editing !== a.room_id) {
-      const gap = this._gapText(uncoveredDays(meta));
+      const rotation = a.schedule_rotation;
+      const activeWeek = Number(a.rotation_week) === 2 ? 2 : 1;
+      const selectedWeek = rotation?.enabled && rotation.weeks?.[String(this._scheduleWeek[a.room_id] || activeWeek)]
+        ? Number(this._scheduleWeek[a.room_id] || activeWeek)
+        : null;
+      const selectedRotation = selectedWeek ? rotation.weeks[String(selectedWeek)] : null;
+      const displaySchedule = selectedRotation?.profiles || a.schedule || {};
+      const displayMeta = selectedRotation?.profile_days || meta;
+      const gap = this._gapText(uncoveredDays(displayMeta));
       const pending = this._pendingProfile && this._pendingProfile.room === a.room_id ? this._pendingProfile : null;
       const notice = pending
         ? `<div class="confirmbox"><span>${esc(this._t("gap_confirm").replace("{days}", this._gapText(uncoveredDays(pending.days))))}</span>
@@ -5006,7 +5045,17 @@ class SmartHeatingControlCard extends HTMLElement {
         : gap
           ? `<p class="hint warn">${esc(this._t("gap_warning").replace("{days}", gap))}</p>`
           : "";
-      const profiles = Object.entries(a.schedule || {})
+      const weekPicker = selectedWeek
+        ? `<div class="row wrap rotation-preview" role="group" aria-label="Rotazione bisettimanale">
+            ${[1, 2].map((week) => this._btn(
+              `Week ${week} · ${week === activeWeek ? "In corso" : "Successiva"}`,
+              `data-action="schedule-week" data-room="${esc(a.room_id)}" data-week="${week}"`,
+              { kind: selectedWeek === week ? "primary" : "soft" }
+            )).join("")}
+          </div>`
+        : "";
+      const profiles = Object.entries(displaySchedule)
+        .sort((left, right) => profileDayIndex(left[0], displayMeta[left[0]]) - profileDayIndex(right[0], displayMeta[right[0]]) || left[0].localeCompare(right[0]))
         .map(([name, slots]) => {
           const rows = this._intervals(slots)
             .map(
@@ -5016,11 +5065,11 @@ class SmartHeatingControlCard extends HTMLElement {
               }</span><span class="pname">${esc(this._presetName(a, it.preset))}</span></li>`
             )
             .join("");
-          const on = !!(meta[name] && meta[name].enabled);
-          return `<div class="profile ${a.profile === name ? "today" : ""} ${on ? "" : "off"}">
+          const on = !!(displayMeta[name] && displayMeta[name].enabled);
+          return `<div class="profile ${selectedWeek === activeWeek && a.profile === name ? "today" : ""} ${on ? "" : "off"}">
               <div class="phead"><b>${esc(name)}</b>${
-            a.profile === name ? `<span class="pill">${this._t("today")}</span>` : ""
-          }<span class="muted">${esc(this._profileDays(meta[name]))}</span>${this._profileSwitch(a.room_id, name, on, "profile-toggle")}</div>
+            selectedWeek === activeWeek && a.profile === name ? `<span class="pill">${this._t("today")}</span>` : ""
+          }<span class="muted">${esc(this._profileDays(displayMeta[name]))}</span>${selectedWeek === activeWeek ? this._profileSwitch(a.room_id, name, on, "profile-toggle") : ""}</div>
               <div class="sbar ro">${this._barInner(a, name, slots, false)}</div>
               <ul class="intervals">${rows}</ul></div>`;
         })
@@ -5028,7 +5077,7 @@ class SmartHeatingControlCard extends HTMLElement {
       return this._fold(
         `sched-${a.room_id}`,
         this._t("schedule"),
-        `${intro}${notice}<div class="profiles">${profiles}</div>
+        `${intro}${notice}${weekPicker}<div class="profiles">${profiles}</div>
          <div class="row">${this._btn(this._t("edit"), `data-action="edit" data-room="${esc(a.room_id)}"`, {
            icon: "pencil",
            kind: "primary",
@@ -5041,6 +5090,10 @@ class SmartHeatingControlCard extends HTMLElement {
         this._presetName(a, preset)
       )}</option>`;
     const blocks = Object.entries(this._draft || {})
+      .sort((a, b) => {
+        const rank = (entry) => profileDayIndex(entry[0], (this._draftDays || {})[entry[0]]);
+        return rank(a) - rank(b) || a[0].localeCompare(b[0]);
+      })
       .map(([name, slots]) => {
         const intervals = this._intervals(slots);
         const sorted = [...slots]
@@ -5097,9 +5150,22 @@ class SmartHeatingControlCard extends HTMLElement {
           </div>`;
       })
       .join("");
+    const rotation = this._draftWeeks
+      ? `<div class="rotation-editor">
+          <div class="row wrap">
+            <b>Rotazione bisettimanale</b>
+            ${this._btn(this._draftRotationEnabled ? "Attiva" : "Disattivata", `data-action="rotation-toggle" data-room="${esc(a.room_id)}"`, { kind: this._draftRotationEnabled ? "primary" : "soft" })}
+          </div>
+          <div class="row wrap rotation-tabs">
+            ${[1, 2].map((w) => this._btn(`Week ${w}`, `data-action="rotation-week" data-room="${esc(a.room_id)}" data-week="${w}"`, { kind: this._draftWeek === w ? "primary" : "soft" })).join("")}
+          </div>
+          <p class="hint">Alla prima attivazione, la settimana corrente viene salvata come Week 1. I salvataggi successivi modificano solo gli orari e mantengono invariato il calendario alternato: Week 1 e Week 2 non vengono scambiate.</p>
+        </div>`
+      : "";
     return `<div class="editor">
         <div class="ehead"><b>${this._t("schedule")}</b></div>
         ${intro}
+        ${rotation}
         <p class="hint">${this._t("drag_hint")}</p>
         ${(() => {
           const gap = this._gapText(uncoveredDays(this._draftDays));
@@ -5151,7 +5217,14 @@ class SmartHeatingControlCard extends HTMLElement {
   /** "Copy over…" select of the schedule editor. */
   _copySelect(name) {
     const existing = Object.keys(this._draft || {});
-    const targets = [...existing, ...["workday", "weekend", ...WEEKDAY_KEYS].filter((p) => !existing.includes(p))]
+    const existingDays = new Set(
+      existing.flatMap((p) => {
+        const key = String(p).toLowerCase();
+        return WEEKDAY_KEYS.filter((day) => WEEKDAY_ALIASES[day].includes(key));
+      })
+    );
+    const suggestedDays = WEEKDAY_KEYS.filter((day) => !existingDays.has(day));
+    const targets = [...existing, ...["workday", "weekend", ...suggestedDays].filter((p) => !existing.includes(p))]
       .filter((p) => p !== name);
     const label = (p) => {
       const day = WEEKDAY_KEYS.indexOf(p);
@@ -5674,7 +5747,7 @@ class SmartHeatingControlCard extends HTMLElement {
     }
     const el = ev.target.closest("[data-action]");
     if (!el || el.tagName === "SELECT" || el.tagName === "INPUT") return;
-    const { action, room, profile, index, entity, option, key, house } = el.dataset;
+    const { action, room, profile, index, entity, option, key, house, week } = el.dataset;
     if (action === "more") {
       this.dispatchEvent(
         new CustomEvent("hass-more-info", { detail: { entityId: entity }, bubbles: true, composed: true })
@@ -5682,6 +5755,9 @@ class SmartHeatingControlCard extends HTMLElement {
       return;
     }
     switch (action) {
+      case "schedule-week":
+        if (room && (week === "1" || week === "2")) this._scheduleWeek[room] = Number(week);
+        break;
       case "fold":
         this._open[key] = el.getAttribute("aria-expanded") !== "true";
         // One chart window at a time.
@@ -5786,13 +5862,40 @@ class SmartHeatingControlCard extends HTMLElement {
         this._open[`sched-${room}`] = true;
         this._draft = JSON.parse(JSON.stringify(stateObj.attributes.schedule));
         this._draftDays = JSON.parse(JSON.stringify(stateObj.attributes.profile_days || {}));
+        const savedRotation = stateObj.attributes.schedule_rotation;
+        this._draftRotationEnabled = !!savedRotation?.enabled;
+        this._draftRotationAnchor = savedRotation?.anchor || null;
+        this._draftWeeks = {
+          1: {
+            profiles: JSON.parse(JSON.stringify(savedRotation?.weeks?.["1"]?.profiles || this._draft)),
+            profile_days: JSON.parse(JSON.stringify(savedRotation?.weeks?.["1"]?.profile_days || this._draftDays)),
+          },
+          2: {
+            profiles: JSON.parse(JSON.stringify(savedRotation?.weeks?.["2"]?.profiles || this._draft)),
+            profile_days: JSON.parse(JSON.stringify(savedRotation?.weeks?.["2"]?.profile_days || this._draftDays)),
+          },
+        };
+        this._draftWeek = 1;
         this._pendingProfile = null;
         break;
       }
+      case "rotation-week": {
+        if (!this._draftWeeks) return;
+        this._draftWeeks[this._draftWeek] = { profiles: this._draft, profile_days: this._draftDays };
+        this._draftWeek = Number(el.dataset.week) === 2 ? 2 : 1;
+        this._draft = JSON.parse(JSON.stringify(this._draftWeeks[this._draftWeek].profiles));
+        this._draftDays = JSON.parse(JSON.stringify(this._draftWeeks[this._draftWeek].profile_days || {}));
+        break;
+      }
+      case "rotation-toggle":
+        this._draftRotationEnabled = !this._draftRotationEnabled;
+        break;
       case "cancel":
         this._editing = null;
         this._draft = null;
         this._draftDays = null;
+        this._draftWeeks = null;
+        this._draftRotationAnchor = null;
         break;
       case "profile-toggle": {
         // On / off from the schedule: saved at once; days left without a profile ask first.
@@ -5873,6 +5976,20 @@ class SmartHeatingControlCard extends HTMLElement {
         break;
       }
       case "save": {
+        if (this._draftWeeks) {
+          this._draftWeeks[this._draftWeek] = { profiles: this._draft, profile_days: this._draftDays };
+        }
+        const monday = new Date();
+        const day = monday.getDay() || 7;
+        monday.setDate(monday.getDate() - day + 1);
+        monday.setHours(0, 0, 0, 0);
+        const rotation = this._draftRotationEnabled && this._draftWeeks
+          ? {
+              enabled: true,
+              anchor: this._draftRotationAnchor || localIsoDate(monday),
+              weeks: this._draftWeeks,
+            }
+          : null;
         const ok = await this._call(
           "advanced_climate",
           "set_schedule",
@@ -5885,6 +6002,7 @@ class SmartHeatingControlCard extends HTMLElement {
                 (this._draftDays || {})[name] || { days: guessDays(name), enabled: false },
               ])
             ),
+            schedule_rotation: rotation,
           },
           `sched-${room}`
         );
@@ -5892,6 +6010,8 @@ class SmartHeatingControlCard extends HTMLElement {
           this._editing = null;
           this._draft = null;
           this._draftDays = null;
+          this._draftWeeks = null;
+          this._draftRotationAnchor = null;
         }
         break;
       }

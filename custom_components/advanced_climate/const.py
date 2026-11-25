@@ -362,6 +362,9 @@ CONF_WINDOW_DROP_DEGREES: Final = "window_drop_degrees"
 CONF_WINDOW_DROP_MINUTES: Final = "window_drop_minutes"
 CONF_SCHEDULE_SOURCE: Final = "schedule_source"
 CONF_SCHEDULE: Final = "schedule"
+# Optional alternating two-week schedules.  Week 1 is anchored when rotation
+# is enabled; the two stored schedules are selected automatically thereafter.
+CONF_SCHEDULE_ROTATION: Final = "schedule_rotation"
 # Days and on / off of each profile: {name: {"days": ..., "enabled": bool}}.
 CONF_PROFILE_DAYS: Final = "profile_days"
 DAYS_ALL: Final = "all"

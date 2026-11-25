@@ -292,6 +292,8 @@ class DecisionSensor(RoomEntity, SensorEntity):
             "plan": room.plan(dt_util.utcnow()),
             "schedule": profiles_to_dict(room.schedule.profiles),
             "profile_days": room.schedule.profile_days,
+            "schedule_rotation": room.config.get("schedule_rotation"),
+            "rotation_week": room._rotation_week,
             "schedule_error": room.schedule_error,
             "schedule_editable": room.config.get("schedule_source", "internal") == "internal",
             "presets": list(PRESETS),

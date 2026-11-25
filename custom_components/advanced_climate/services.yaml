@@ -89,3 +89,6 @@ set_schedule:
     profile_days:
       selector:
         object:
+    schedule_rotation:
+      selector:
+        object:

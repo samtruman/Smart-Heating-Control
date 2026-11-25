@@ -148,7 +148,7 @@ def _remove_old_entities(hass: HomeAssistant, entry: ConfigEntry) -> None:
             registry.async_remove(item.entity_id)
 
 
-_SCHEDULE_KEYS = (CONF_SCHEDULE, CONF_PROFILE_DAYS)
+_SCHEDULE_KEYS = (CONF_SCHEDULE, CONF_PROFILE_DAYS, "schedule_rotation")
 
 
 def _snapshot(entry: ConfigEntry) -> tuple:
@@ -181,6 +181,7 @@ async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> Non
                 room.apply_schedule(
                     sub.data.get(CONF_SCHEDULE) or DEFAULT_SCHEDULE,
                     sub.data.get(CONF_PROFILE_DAYS),
+                    sub.data.get("schedule_rotation"),
                 )
         check_scenarios(house)
         house.async_save()

@@ -22,6 +22,7 @@ if _PKG not in sys.modules:
 
 const = importlib.import_module(f"{_PKG}.const")
 schedule = importlib.import_module(f"{_PKG}.schedule")
+biweekly = importlib.import_module(f"{_PKG}.biweekly")
 presence = importlib.import_module(f"{_PKG}.presence")
 engine = importlib.import_module(f"{_PKG}.engine")
 outdoor = importlib.import_module(f"{_PKG}.outdoor")

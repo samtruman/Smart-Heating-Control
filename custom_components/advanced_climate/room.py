@@ -58,6 +58,7 @@ from .const import (
     CONF_PRESET_NAMES,
     CONF_PROFILE_DAYS,
     CONF_SCHEDULE,
+    CONF_SCHEDULE_ROTATION,
     CONF_SCHEDULE_HELPER,
     CONF_SCHEDULE_SOURCE,
     CONF_SOLAR_OFFSET,
@@ -111,6 +112,7 @@ from .const import (
     WEEKDAYS,
 )
 from .device_echo import DeviceLimits, SentValues
+from .biweekly import rotation_week
 from .engine import (
     KIND_NONE,
     KIND_OFF,
@@ -227,6 +229,7 @@ class Room(RoomDevices, RoomOverride, RoomOptimal, RoomAlerts, RoomStatus):
         # Schedule
         self.schedule_error: str | None = None
         self.schedule = self._build_schedule(self.config.get(CONF_SCHEDULE) or DEFAULT_SCHEDULE)
+        self._rotation_week: int | None = None
         self.schedule_state: ScheduleState | None = None
 
         # Persisted state
@@ -365,12 +368,35 @@ class Room(RoomDevices, RoomOverride, RoomOptimal, RoomAlerts, RoomStatus):
     # ------------------------------------------------------------------
     # Setup
     # ------------------------------------------------------------------
-    def apply_schedule(self, text: str, profile_days: dict | None = None) -> None:
+    def apply_schedule(
+        self,
+        text: str,
+        profile_days: dict | None = None,
+        rotation: dict | None = None,
+    ) -> None:
         """Use a new schedule (and the days of its profiles) without reloading."""
         self.config[CONF_SCHEDULE] = text
         self.config[CONF_PROFILE_DAYS] = profile_days
+        self.config[CONF_SCHEDULE_ROTATION] = rotation
         self.schedule_error = None
         self.schedule = self._build_schedule(text)
+        self._rotation_week = None
+
+    def _apply_rotation(self, now: datetime) -> None:
+        """Select the saved Week 1/Week 2 schedule for the current local week."""
+        rotation = self.config.get(CONF_SCHEDULE_ROTATION)
+        week = rotation_week(rotation, dt_util.as_local(now).date())
+        if week is None or week == self._rotation_week:
+            return
+        selected = (rotation.get("weeks") or {}).get(str(week)) if isinstance(rotation, dict) else None
+        if not isinstance(selected, dict):
+            return
+        text = selected.get("schedule")
+        if not isinstance(text, str) or not text.strip():
+            return
+        self.schedule_error = None
+        self.schedule = self._build_schedule(text, selected.get("profile_days"))
+        self._rotation_week = week
 
     async def async_activate_profile(self, name: str) -> None:
         """Turn a profile on, as in the card: the active ones of the same days go off."""
@@ -411,7 +437,7 @@ class Room(RoomDevices, RoomOverride, RoomOptimal, RoomAlerts, RoomStatus):
             entry, subentry, data={**subentry.data, CONF_PROFILE_DAYS: days}
         )
 
-    def _build_schedule(self, text: str) -> Schedule:
+    def _build_schedule(self, text: str, profile_days: dict | None = None) -> Schedule:
         """Parse the schedule text; the default schedule is used when it is invalid."""
         valid_names = list(PRESETS) + [n for n in self.preset_names.values() if n not in PRESETS]
         try:
@@ -424,7 +450,8 @@ class Room(RoomDevices, RoomOverride, RoomOptimal, RoomAlerts, RoomStatus):
             name: [Slot(s.minute, self.aliases.get(s.preset.lower(), s.preset)) for s in slots]
             for name, slots in profiles.items()
         }
-        days = self.config.get(CONF_PROFILE_DAYS) if not self.schedule_error else None
+        days = profile_days if profile_days is not None else self.config.get(CONF_PROFILE_DAYS)
+        days = days if not self.schedule_error else None
         return Schedule(normalized, self.house.day_boundary_minutes, days)
 
     @callback
@@ -1014,6 +1041,7 @@ class Room(RoomDevices, RoomOverride, RoomOptimal, RoomAlerts, RoomStatus):
         self._update_window(now)
         self._account_runtime(now)
 
+        self._apply_rotation(now)
         state = self._schedule_lookup(now)
         self.schedule_state = state
         preset, schedule_rule = self._schedule_preset(now, state)

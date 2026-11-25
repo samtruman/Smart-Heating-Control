@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from datetime import datetime
+from datetime import date, datetime
 from typing import TYPE_CHECKING, Any
 
 import voluptuous as vol
@@ -17,6 +17,7 @@ from homeassistant.util import dt as dt_util
 from .const import (
     CONF_PROFILE_DAYS,
     CONF_SCHEDULE,
+    CONF_SCHEDULE_ROTATION,
     CONF_SCHEDULE_SOURCE,
     DOMAIN,
     OVERRIDE_HOURS_MAX,
@@ -30,6 +31,7 @@ from .schedule import (
     format_schedule,
     normalize_profile_days,
     parse_schedule,
+    profiles_to_dict,
     profiles_from_dict,
     validate_profile_days,
 )
@@ -85,6 +87,7 @@ SET_SCHEDULE_SCHEMA = vol.Schema(
         vol.Optional(ATTR_SCHEDULE): cv.string,
         vol.Optional(ATTR_PROFILES): dict,
         vol.Optional(ATTR_PROFILE_DAYS): dict,
+        vol.Optional(CONF_SCHEDULE_ROTATION): dict,
     }
 )
 
@@ -245,6 +248,54 @@ def async_setup_services(hass: HomeAssistant) -> None:
                     translation_domain=DOMAIN, translation_key="schedule_external"
                 )
             valid_names = list(PRESETS) + list(room.preset_names.values())
+            rotation_present = CONF_SCHEDULE_ROTATION in call.data
+            rotation = call.data.get(CONF_SCHEDULE_ROTATION)
+            normalized_rotation = None
+            if rotation is not None:
+                if not isinstance(rotation, dict) or not rotation.get("enabled"):
+                    normalized_rotation = None
+                else:
+                    try:
+                        anchor = date.fromisoformat(str(rotation["anchor"]))
+                        weeks = rotation["weeks"]
+                        if not isinstance(weeks, dict) or not {"1", "2"}.issubset(weeks):
+                            raise ValueError("weeks must contain 1 and 2")
+                    except (KeyError, TypeError, ValueError) as err:
+                        raise ServiceValidationError("invalid schedule rotation") from err
+                    normalized_weeks = {}
+                    for week in ("1", "2"):
+                        item = weeks[week]
+                        if not isinstance(item, dict):
+                            raise ServiceValidationError("invalid schedule rotation week")
+                        week_profiles = item.get("profiles")
+                        week_text = item.get("schedule")
+                        try:
+                            if week_profiles is not None:
+                                parsed_week = profiles_from_dict(week_profiles, valid_names)
+                            elif isinstance(week_text, str):
+                                parsed_week = parse_schedule(week_text, valid_names)
+                            else:
+                                raise ScheduleError("missing schedule")
+                            week_days = item.get("profile_days")
+                            week_days = (
+                                validate_profile_days(week_days, parsed_week)
+                                if week_days is not None
+                                else None
+                            )
+                        except (ScheduleError, KeyError, TypeError, AttributeError) as err:
+                            raise ServiceValidationError(
+                                f"invalid schedule rotation week {week}"
+                            ) from err
+                        normalized_weeks[week] = {
+                            "schedule": format_schedule(parsed_week),
+                            "profiles": profiles_to_dict(parsed_week),
+                            "profile_days": week_days,
+                        }
+                    normalized_rotation = {
+                        "enabled": True,
+                        "anchor": anchor.isoformat(),
+                        "weeks": normalized_weeks,
+                    }
             try:
                 if profiles is not None:
                     parsed = profiles_from_dict(profiles, valid_names)
@@ -272,14 +323,17 @@ def async_setup_services(hass: HomeAssistant) -> None:
                 ) from err
             entry = room.house.entry
             subentry = entry.subentries[room.id]
+            updated = {
+                **subentry.data,
+                CONF_SCHEDULE: format_schedule(parsed),
+                CONF_PROFILE_DAYS: days,
+            }
+            if rotation_present:
+                updated[CONF_SCHEDULE_ROTATION] = normalized_rotation
             hass.config_entries.async_update_subentry(
                 entry,
                 subentry,
-                data={
-                    **subentry.data,
-                    CONF_SCHEDULE: format_schedule(parsed),
-                    CONF_PROFILE_DAYS: days,
-                },
+                data=updated,
             )
             # The update listener applies the new schedule without a reload.
 
